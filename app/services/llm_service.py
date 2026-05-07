@@ -56,9 +56,10 @@ class OpenAIProvider(BaseLLMProvider):
 
     def __init__(self, api_key: str):
         from openai import OpenAI
-        self._client = OpenAI(api_key=api_key)
+        self._client = OpenAI(api_key=api_key, timeout=30.0)  # 30s timeout
         self._model  = os.getenv("OPENAI_MODEL", self.DEFAULT_MODEL)
-        logger.info(f"[OpenAI] Initialised — model: {self._model}")
+        self._max_tokens = int(os.getenv("LLM_MAX_TOKENS", "1024"))
+        logger.info(f"[OpenAI] Initialised — model: {self._model}, max_tokens: {self._max_tokens}")
 
     @property
     def name(self): return "openai"
@@ -69,7 +70,7 @@ class OpenAIProvider(BaseLLMProvider):
             resp = self._client.chat.completions.create(
                 model       = self._model,
                 messages    = full_messages,
-                max_tokens  = 1024,
+                max_tokens  = self._max_tokens,
                 temperature = 0.2,
             )
             return resp.choices[0].message.content.strip()
@@ -95,7 +96,8 @@ class GeminiProvider(BaseLLMProvider):
         genai.configure(api_key=api_key)
         self._genai      = genai
         self._model_name = os.getenv("GEMINI_MODEL", self.DEFAULT_MODEL)
-        logger.info(f"[Gemini] Initialised — model: {self._model_name}")
+        self._max_tokens = int(os.getenv("LLM_MAX_TOKENS", "1024"))
+        logger.info(f"[Gemini] Initialised — model: {self._model_name}, max_tokens: {self._max_tokens}")
 
     @property
     def name(self): return "gemini"
@@ -121,7 +123,7 @@ class GeminiProvider(BaseLLMProvider):
                 system_instruction = system,        # Gemini-specific param
                 generation_config  = {
                     "temperature":      0.2,
-                    "max_output_tokens": 1024,
+                    "max_output_tokens": self._max_tokens,
                 }
             )
             history       = self._convert_history(messages[:-1])
@@ -216,7 +218,8 @@ class LLMService:
 
     def __init__(self):
         self._provider = _build_provider()
-        logger.info(f"[LLM] Active provider: {self._provider.name}")
+        self._history_length = int(os.getenv("LLM_HISTORY_LENGTH", "6"))
+        logger.info(f"[LLM] Active provider: {self._provider.name}, history_length: {self._history_length}")
 
     def _build_context_block(self, chunks: list) -> str:
         if not chunks:
@@ -240,7 +243,7 @@ class LLMService:
 
         messages = []
         if history:
-            for msg in history[-6:]:
+            for msg in history[-self._history_length:]:
                 messages.append({"role": msg["role"], "content": msg["content"]})
         messages.append({"role": "user", "content": query})
 
