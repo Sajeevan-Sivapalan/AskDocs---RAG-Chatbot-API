@@ -133,3 +133,26 @@ def test_document_processor_ingest_and_retrieve():
     chunk, score = results[0]
     assert "Python" in chunk.content
     assert 0.0 <= score <= 1.1   # cosine on unit vectors, allow tiny float error
+
+
+def test_document_processor_concurrent_ingest():
+    import threading
+    from app.services.document_processor import DocumentProcessor
+
+    dp = DocumentProcessor()
+    start_count = dp.chunk_count
+
+    def ingest_text(text):
+        dp.ingest_text(text, source="concurrent-test")
+
+    threads = [
+        threading.Thread(target=ingest_text, args=(f"Sample content {i} for concurrency test.",))
+        for i in range(4)
+    ]
+
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert dp.chunk_count >= start_count + 4

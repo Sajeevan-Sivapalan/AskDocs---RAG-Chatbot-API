@@ -9,6 +9,7 @@ Document Processing Service
 import os
 import logging
 import pickle
+import threading
 from pathlib import Path
 from typing import List, Tuple, Optional
 
@@ -72,6 +73,7 @@ class DocumentProcessor:
         self._embeddings: Optional[np.ndarray] = None
         self._index       = None            # FAISS index or None
         self._model       = None
+        self._lock        = threading.RLock()
 
         self._load_model()
         self._load_persisted_index()
@@ -140,35 +142,38 @@ class DocumentProcessor:
 
     # ── Indexing ──────────────────────────────────────────────────────────────
     def _build_index(self, embeddings: np.ndarray):
-        dim = embeddings.shape[1]
-        if _FAISS_AVAILABLE:
-            index = faiss.IndexFlatIP(dim)   # Inner-product on unit vecs = cosine
-            index.add(embeddings)
-            self._index = index
-        else:
-            self._index = None               # fallback: brute-force numpy
+        with self._lock:
+            dim = embeddings.shape[1]
+            if _FAISS_AVAILABLE:
+                index = faiss.IndexFlatIP(dim)   # Inner-product on unit vecs = cosine
+                index.add(embeddings)
+                self._index = index
+            else:
+                self._index = None               # fallback: brute-force numpy
 
     def _save_index(self):
-        os.makedirs("data", exist_ok=True)
-        if _FAISS_AVAILABLE and self._index is not None:
-            faiss.write_index(self._index, self.INDEX_PATH)
-        np.save(self.INDEX_PATH + ".npy", self._embeddings)
-        with open(self.CHUNKS_PATH, "wb") as f:
-            pickle.dump(self._chunks, f)
-        logger.info(f"Index saved ({len(self._chunks)} chunks)")
+        with self._lock:
+            os.makedirs("data", exist_ok=True)
+            if _FAISS_AVAILABLE and self._index is not None:
+                faiss.write_index(self._index, self.INDEX_PATH)
+            np.save(self.INDEX_PATH + ".npy", self._embeddings)
+            with open(self.CHUNKS_PATH, "wb") as f:
+                pickle.dump(self._chunks, f)
+            logger.info(f"Index saved ({len(self._chunks)} chunks)")
 
     def _load_persisted_index(self):
-        if not os.path.exists(self.CHUNKS_PATH):
-            return
-        try:
-            with open(self.CHUNKS_PATH, "rb") as f:
-                self._chunks = pickle.load(f)
-            self._embeddings = np.load(self.INDEX_PATH + ".npy")
-            if _FAISS_AVAILABLE and os.path.exists(self.INDEX_PATH):
-                self._index = faiss.read_index(self.INDEX_PATH)
-            logger.info(f"Loaded persisted index: {len(self._chunks)} chunks")
-        except Exception as e:
-            logger.warning(f"Could not load persisted index: {e}")
+        with self._lock:
+            if not os.path.exists(self.CHUNKS_PATH):
+                return
+            try:
+                with open(self.CHUNKS_PATH, "rb") as f:
+                    self._chunks = pickle.load(f)
+                self._embeddings = np.load(self.INDEX_PATH + ".npy")
+                if _FAISS_AVAILABLE and os.path.exists(self.INDEX_PATH):
+                    self._index = faiss.read_index(self.INDEX_PATH)
+                logger.info(f"Loaded persisted index: {len(self._chunks)} chunks")
+            except Exception as e:
+                logger.warning(f"Could not load persisted index: {e}")
 
     # ── Public API ────────────────────────────────────────────────────────────
     def ingest_file(self, path: str) -> int:
@@ -182,15 +187,17 @@ class DocumentProcessor:
 
         new_embeddings = self._embed([c.content for c in new_chunks])
 
-        # Append to existing
-        self._chunks.extend(new_chunks)
-        if self._embeddings is None:
-            self._embeddings = new_embeddings
-        else:
-            self._embeddings = np.vstack([self._embeddings, new_embeddings])
+        with self._lock:
+            # Append to existing
+            self._chunks.extend(new_chunks)
+            if self._embeddings is None:
+                self._embeddings = new_embeddings
+            else:
+                self._embeddings = np.vstack([self._embeddings, new_embeddings])
 
-        self._build_index(self._embeddings)
-        self._save_index()
+            self._build_index(self._embeddings)
+            self._save_index()
+
         logger.info(f"Indexed {len(new_chunks)} chunks from {path}")
         return len(new_chunks)
 
@@ -200,13 +207,17 @@ class DocumentProcessor:
         if not chunks:
             return 0
         embeddings = self._embed([c.content for c in chunks])
-        self._chunks.extend(chunks)
-        if self._embeddings is None:
-            self._embeddings = embeddings
-        else:
-            self._embeddings = np.vstack([self._embeddings, embeddings])
-        self._build_index(self._embeddings)
-        self._save_index()
+
+        with self._lock:
+            self._chunks.extend(chunks)
+            if self._embeddings is None:
+                self._embeddings = embeddings
+            else:
+                self._embeddings = np.vstack([self._embeddings, embeddings])
+
+            self._build_index(self._embeddings)
+            self._save_index()
+
         return len(chunks)
 
     def retrieve(self, query: str, top_k: int = 3) -> List[Tuple[Chunk, float]]:
@@ -214,10 +225,11 @@ class DocumentProcessor:
         Return top_k (chunk, score) pairs sorted by cosine similarity.
         Returns [] if no documents are indexed.
         """
-        if not self._chunks or self._embeddings is None:
-            return []
+        with self._lock:
+            if not self._chunks or self._embeddings is None:
+                return []
 
-        q_vec = self._embed([query])   # shape (1, dim)
+            q_vec = self._embed([query])   # shape (1, dim)
 
         if _FAISS_AVAILABLE and self._index is not None:
             scores, indices = self._index.search(q_vec, min(top_k, len(self._chunks)))
