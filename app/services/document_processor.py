@@ -12,7 +12,7 @@ import pickle
 import threading
 import hashlib
 from pathlib import Path
-from typing import List, Tuple, Optional, Dict
+from typing import List, Tuple, Optional, Dict, Any
 
 import numpy as np
 
@@ -48,10 +48,11 @@ except ImportError:
 
 # ── Data classes (no dataclasses dep needed) ──────────────────────────────────
 class Chunk:
-    def __init__(self, content: str, source: str, page: Optional[int] = None):
+    def __init__(self, content: str, source: str, page: Optional[int] = None, document_id: Optional[str] = None):
         self.content = content
         self.source  = source
         self.page    = page
+        self.document_id = document_id or source  # Use source as document_id if not specified
 
 
 class DocumentProcessor:
@@ -151,16 +152,36 @@ class DocumentProcessor:
             return self._parse_txt(path)
 
     # ── Chunking ──────────────────────────────────────────────────────────────
-    def _chunk_text(self, text: str, source: str) -> List[Chunk]:
+    def _chunk_text(self, text: str, source: str, document_id: Optional[str] = None) -> List[Chunk]:
         chunks = []
         start  = 0
         while start < len(text):
             end     = min(start + self.CHUNK_SIZE, len(text))
             content = text[start:end].strip()
             if len(content) > 30:              # skip tiny fragments
-                chunks.append(Chunk(content=content, source=source))
+                chunks.append(Chunk(content=content, source=source, document_id=document_id))
             start += self.CHUNK_SIZE - self.CHUNK_OVERLAP
         return chunks
+
+    def _remove_chunks_by_document(self, document_id: str) -> int:
+        """Remove all chunks belonging to a specific document. Returns count removed."""
+        with self._lock:
+            original_count = len(self._chunks)
+            self._chunks = [chunk for chunk in self._chunks if chunk.document_id != document_id]
+            removed_count = original_count - len(self._chunks)
+
+            if removed_count > 0:
+                # Rebuild index and embeddings
+                if self._chunks:
+                    self._embeddings = self._embed([c.content for c in self._chunks])
+                    self._build_index(self._embeddings)
+                else:
+                    self._embeddings = None
+                    self._index = None
+
+                self._save_index()
+
+            return removed_count
 
     # ── Indexing ──────────────────────────────────────────────────────────────
     def _build_index(self, embeddings: np.ndarray):
@@ -211,7 +232,7 @@ class DocumentProcessor:
                 logger.warning(f"Could not load persisted index: {e}")
 
     # ── Public API ────────────────────────────────────────────────────────────
-    def ingest_file(self, path: str) -> int:
+    def ingest_file(self, path: str, document_id: Optional[str] = None) -> int:
         """Parse → chunk → embed → index. Returns chunk count."""
         import time
         start_time = time.time()
@@ -227,7 +248,11 @@ class DocumentProcessor:
             if not raw_text.strip():
                 raise ValueError(f"No text content extracted from file: {path}")
 
-            new_chunks = self._chunk_text(raw_text, source=Path(path).name)
+            # Use filename as document_id if not provided
+            if document_id is None:
+                document_id = Path(path).name
+
+            new_chunks = self._chunk_text(raw_text, source=Path(path).name, document_id=document_id)
 
             if not new_chunks:
                 raise ValueError("No chunks created from document content.")
@@ -235,6 +260,9 @@ class DocumentProcessor:
             new_embeddings = self._embed([c.content for c in new_chunks])
 
             with self._lock:
+                # Remove existing chunks for this document if any
+                self._remove_chunks_by_document(document_id)
+
                 # Append to existing
                 self._chunks.extend(new_chunks)
                 if self._embeddings is None:
@@ -268,14 +296,20 @@ class DocumentProcessor:
 
             raise
 
-    def ingest_text(self, text: str, source: str = "inline") -> int:
+    def ingest_text(self, text: str, source: str = "inline", document_id: Optional[str] = None) -> int:
         """Ingest raw text directly (no file needed)."""
-        chunks = self._chunk_text(text, source=source)
+        if document_id is None:
+            document_id = source
+
+        chunks = self._chunk_text(text, source=source, document_id=document_id)
         if not chunks:
             return 0
         embeddings = self._embed([c.content for c in chunks])
 
         with self._lock:
+            # Remove existing chunks for this document if any
+            self._remove_chunks_by_document(document_id)
+
             self._chunks.extend(chunks)
             if self._embeddings is None:
                 self._embeddings = embeddings
@@ -348,6 +382,46 @@ class DocumentProcessor:
     @property
     def chunk_count(self) -> int:
         return len(self._chunks)
+
+    def list_documents(self) -> List[Dict[str, Any]]:
+        """List all documents with their metadata."""
+        with self._lock:
+            doc_info = {}
+            for chunk in self._chunks:
+                doc_id = chunk.document_id or chunk.source
+                if doc_id not in doc_info:
+                    doc_info[doc_id] = {
+                        "document_id": doc_id,
+                        "source": chunk.source,
+                        "chunk_count": 0,
+                        "total_chars": 0
+                    }
+                doc_info[doc_id]["chunk_count"] += 1
+                doc_info[doc_id]["total_chars"] += len(chunk.content)
+
+            return list(doc_info.values())
+
+    def delete_document(self, document_id: str) -> bool:
+        """Delete all chunks belonging to a specific document. Returns True if any chunks were removed."""
+        removed_count = self._remove_chunks_by_document(document_id)
+        return removed_count > 0
+
+    def get_document_info(self, document_id: str) -> Optional[Dict[str, Any]]:
+        """Get information about a specific document."""
+        with self._lock:
+            for chunk in self._chunks:
+                if chunk.document_id == document_id or chunk.source == document_id:
+                    # Count all chunks for this document
+                    chunk_count = sum(1 for c in self._chunks if (c.document_id == document_id or c.source == document_id))
+                    total_chars = sum(len(c.content) for c in self._chunks if (c.document_id == document_id or c.source == document_id))
+
+                    return {
+                        "document_id": document_id,
+                        "source": chunk.source,
+                        "chunk_count": chunk_count,
+                        "total_chars": total_chars
+                    }
+            return None
 
 
 # Singleton
