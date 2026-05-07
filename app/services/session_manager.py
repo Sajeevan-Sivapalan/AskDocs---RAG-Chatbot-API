@@ -18,15 +18,18 @@ try:
     import redis
     import json as _json
     _REDIS_URL = os.getenv("REDIS_URL", "")
-    _redis_client = redis.from_url(_REDIS_URL) if _REDIS_URL else None
-    if _redis_client:
+    if _REDIS_URL:
+        # Use connection pool for better performance and connection management
+        _redis_pool = redis.ConnectionPool.from_url(_REDIS_URL, max_connections=10, decode_responses=True)
+        _redis_client = redis.Redis(connection_pool=_redis_pool)
         _redis_client.ping()
-        logger.info("Redis session store connected")
+        logger.info("Redis session store connected with connection pool")
     else:
+        _redis_client = None
         logger.info("No REDIS_URL — using in-memory session store")
-except Exception:
+except Exception as e:
     _redis_client = None
-    logger.info("Redis unavailable — using in-memory session store")
+    logger.info(f"Redis unavailable ({e}) — using in-memory session store")
 
 
 TTL_SECONDS = 1800   # 30 minutes

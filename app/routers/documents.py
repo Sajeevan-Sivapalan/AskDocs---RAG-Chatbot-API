@@ -12,7 +12,7 @@ import logging
 import mimetypes
 from pathlib import Path
 
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, UploadFile, File, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from slowapi import Limiter
@@ -35,12 +35,12 @@ ALLOWED_MIMES  = {
 MAX_SIZE_BYTES = 20 * 1024 * 1024   # 20 MB
 
 # Rate limiting: stricter limits for resource-intensive operations
-limiter = Limiter(key_func=get_remote_address)
+from app.config import limiter
 
 
 @router.post("/documents/upload", summary="Upload and index a document")
 @limiter.limit("5/minute")  # Stricter limit for uploads
-async def upload_document(file: UploadFile = File(...)):
+async def upload_document(request: Request, file: UploadFile = File(...)):
     """
     Accepts PDF, TXT, DOCX, or MD files.
     Parses → chunks → embeds → indexes them for retrieval.
@@ -121,7 +121,7 @@ async def upload_document(file: UploadFile = File(...)):
 
 @router.post("/documents/text", summary="Index raw text directly")
 @limiter.limit("10/minute")  # Moderate limit for text uploads
-async def index_text(payload: dict):
+async def index_text(request: Request, payload: dict):
     """
     Body: { "text": "...", "source": "my-doc" }
     Useful for programmatic ingestion without a file upload.
@@ -155,7 +155,7 @@ async def index_status():
 
 @router.delete("/documents/reset", summary="Wipe the entire index")
 @limiter.limit("2/minute")  # Very strict limit for destructive operations
-async def reset_index():
+async def reset_index(request: Request):
     """Removes all indexed documents. Use with caution."""
     import pickle, numpy as np, os
 

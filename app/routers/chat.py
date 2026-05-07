@@ -22,7 +22,7 @@ router = APIRouter()
 CONFIDENCE_THRESHOLD = 0.30   # below this → "not enough info"
 
 # Rate limiting: 10 requests per minute per IP for chat
-limiter = Limiter(key_func=get_remote_address)
+from app.config import limiter
 
 
 @router.post("/chat", response_model=ChatResponse, summary="Send a chat message")

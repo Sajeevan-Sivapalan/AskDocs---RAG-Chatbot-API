@@ -10,8 +10,9 @@ import os
 import logging
 import pickle
 import threading
+import hashlib
 from pathlib import Path
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict
 
 import numpy as np
 
@@ -67,6 +68,7 @@ class DocumentProcessor:
     MODEL_NAME    = "multi-qa-mpnet-base-dot-v1"  # 384-dim, fast & accurate
     INDEX_PATH    = "data/faiss.index"
     CHUNKS_PATH   = "data/chunks.pkl"
+    CACHE_SIZE    = 1000  # Max cached query embeddings
 
     def __init__(self):
         self._chunks:     List[Chunk]       = []
@@ -74,6 +76,7 @@ class DocumentProcessor:
         self._index       = None            # FAISS index or None
         self._model       = None
         self._lock        = threading.RLock()
+        self._query_cache: Dict[str, np.ndarray] = {}  # Cache for query embeddings
 
         self._load_model()
         self._load_persisted_index()
@@ -87,16 +90,35 @@ class DocumentProcessor:
             logger.warning("Using mock embeddings (install sentence-transformers)")
 
     def _embed(self, texts: List[str]) -> np.ndarray:
+        """Embed texts with caching for single queries."""
+        if len(texts) == 1:
+            # Check cache for single query
+            query = texts[0]
+            cache_key = hashlib.md5(query.encode()).hexdigest()
+            if cache_key in self._query_cache:
+                return self._query_cache[cache_key].reshape(1, -1)
+
         if self._model:
-            return self._model.encode(texts, normalize_embeddings=True,
-                                      show_progress_bar=False)
-        # Deterministic mock: hash-based 384-dim unit vectors
-        vecs = []
-        for t in texts:
-            rng = np.random.default_rng(abs(hash(t)) % (2**32))
-            v = rng.standard_normal(384).astype("float32")
-            vecs.append(v / (np.linalg.norm(v) + 1e-10))
-        return np.array(vecs, dtype="float32")
+            embeddings = self._model.encode(texts, normalize_embeddings=True,
+                                          show_progress_bar=False)
+        else:
+            # Deterministic mock: hash-based 384-dim unit vectors
+            embeddings = []
+            for t in texts:
+                rng = np.random.default_rng(abs(hash(t)) % (2**32))
+                v = rng.standard_normal(384).astype("float32")
+                embeddings.append(v / (np.linalg.norm(v) + 1e-10))
+            embeddings = np.array(embeddings, dtype="float32")
+
+        # Cache single query embeddings
+        if len(texts) == 1:
+            if len(self._query_cache) >= self.CACHE_SIZE:
+                # Remove oldest entry (simple LRU approximation)
+                oldest_key = next(iter(self._query_cache))
+                del self._query_cache[oldest_key]
+            self._query_cache[cache_key] = embeddings[0]
+
+        return embeddings
 
     # ── Parsing ───────────────────────────────────────────────────────────────
     def _parse_txt(self, path: str) -> str:
@@ -144,8 +166,21 @@ class DocumentProcessor:
     def _build_index(self, embeddings: np.ndarray):
         with self._lock:
             dim = embeddings.shape[1]
+            n_vectors = embeddings.shape[0]
+
             if _FAISS_AVAILABLE:
-                index = faiss.IndexFlatIP(dim)   # Inner-product on unit vecs = cosine
+                if n_vectors < 1000:
+                    # Use exact search for small datasets
+                    index = faiss.IndexFlatIP(dim)
+                else:
+                    # Use IVF for scalability (approximate but much faster)
+                    nlist = min(100, max(4, n_vectors // 39))  # Rule of thumb: sqrt(n)/4
+                    quantizer = faiss.IndexFlatIP(dim)
+                    index = faiss.IndexIVFFlat(quantizer, dim, nlist)
+                    # Train the index
+                    index.train(embeddings)
+                    logger.info(f"Trained IVF index with {nlist} cells for {n_vectors} vectors")
+
                 index.add(embeddings)
                 self._index = index
             else:
@@ -232,6 +267,10 @@ class DocumentProcessor:
             q_vec = self._embed([query])   # shape (1, dim)
 
         if _FAISS_AVAILABLE and self._index is not None:
+            # Configure search parameters for IVF index
+            if hasattr(self._index, 'nprobe'):
+                self._index.nprobe = min(10, self._index.nlist)  # Search more cells for better accuracy
+
             scores, indices = self._index.search(q_vec, min(top_k, len(self._chunks)))
             return [
                 (self._chunks[i], float(scores[0][j]))

@@ -17,24 +17,11 @@ from slowapi.middleware import SlowAPIMiddleware
 from slowapi.errors import RateLimitExceeded
 
 from app.routers import chat, health, documents
+from app.config import limiter
 from app.utils.logger import setup_logger
 
 # ── Setup ─────────────────────────────────────────────────────────────────────
 logger = setup_logger(__name__)
-
-# ── Rate Limiting Configuration ───────────────────────────────────────────────
-def get_limiter() -> Limiter:
-    """Configure rate limiter with Redis backend if available."""
-    redis_url = os.getenv("REDIS_URL")
-    if redis_url:
-        # Use Redis for distributed rate limiting
-        from slowapi import RedisLimiter
-        return RedisLimiter(redis_url=redis_url, key_func=get_remote_address)
-    else:
-        # In-memory limiter for development
-        return Limiter(key_func=get_remote_address)
-
-limiter = get_limiter()
 
 app = FastAPI(
     title="AskDocs - RAG Chatbot API",
