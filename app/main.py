@@ -18,6 +18,7 @@ from slowapi.errors import RateLimitExceeded
 
 from app.routers import chat, health, documents
 from app.config import limiter
+from app.services.metrics import MetricsMiddleware, get_metrics_response
 from app.utils.logger import setup_logger
 
 # ── Setup ─────────────────────────────────────────────────────────────────────
@@ -30,6 +31,9 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc",
 )
+
+# Add metrics middleware (must be first)
+app.add_middleware(MetricsMiddleware)
 
 # Add rate limiting middleware
 app.state.limiter = limiter
@@ -79,11 +83,28 @@ app.include_router(health.router, tags=["Health"])
 app.include_router(chat.router,   prefix="/api/v1", tags=["Chat"])
 app.include_router(documents.router, prefix="/api/v1", tags=["Documents"])
 
+# ── Metrics Endpoint ──────────────────────────────────────────────────────────
+@app.get("/metrics", summary="Prometheus metrics", include_in_schema=False)
+async def metrics():
+    """Expose Prometheus metrics for monitoring."""
+    return get_metrics_response()
+
 # ── Startup / Shutdown ────────────────────────────────────────────────────────
 @app.on_event("startup")
 async def startup_event():
     logger.info("RAG Chatbot API starting up...")
+    # Initialize document processor
+    from app.services.document_processor import document_processor
+    logger.info("Document processor initialized")
 
 @app.on_event("shutdown")
 async def shutdown_event():
     logger.info("RAG Chatbot API shutting down...")
+    # Clean up resources
+    try:
+        from app.services.document_processor import document_processor
+        # Save any pending index changes
+        document_processor._save_index()
+        logger.info("Document processor cleaned up")
+    except Exception as e:
+        logger.error(f"Error during shutdown cleanup: {e}")

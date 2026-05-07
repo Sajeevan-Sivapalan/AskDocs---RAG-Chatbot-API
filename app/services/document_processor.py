@@ -213,28 +213,60 @@ class DocumentProcessor:
     # ── Public API ────────────────────────────────────────────────────────────
     def ingest_file(self, path: str) -> int:
         """Parse → chunk → embed → index. Returns chunk count."""
-        logger.info(f"Ingesting: {path}")
-        raw_text = self._parse_file(path)
-        new_chunks = self._chunk_text(raw_text, source=Path(path).name)
+        import time
+        start_time = time.time()
 
-        if not new_chunks:
-            raise ValueError("No content extracted from document.")
+        try:
+            logger.info(f"Ingesting: {path}")
 
-        new_embeddings = self._embed([c.content for c in new_chunks])
+            if not os.path.exists(path):
+                raise FileNotFoundError(f"File not found: {path}")
 
-        with self._lock:
-            # Append to existing
-            self._chunks.extend(new_chunks)
-            if self._embeddings is None:
-                self._embeddings = new_embeddings
-            else:
-                self._embeddings = np.vstack([self._embeddings, new_embeddings])
+            raw_text = self._parse_file(path)
 
-            self._build_index(self._embeddings)
-            self._save_index()
+            if not raw_text.strip():
+                raise ValueError(f"No text content extracted from file: {path}")
 
-        logger.info(f"Indexed {len(new_chunks)} chunks from {path}")
-        return len(new_chunks)
+            new_chunks = self._chunk_text(raw_text, source=Path(path).name)
+
+            if not new_chunks:
+                raise ValueError("No chunks created from document content.")
+
+            new_embeddings = self._embed([c.content for c in new_chunks])
+
+            with self._lock:
+                # Append to existing
+                self._chunks.extend(new_chunks)
+                if self._embeddings is None:
+                    self._embeddings = new_embeddings
+                else:
+                    self._embeddings = np.vstack([self._embeddings, new_embeddings])
+
+                self._build_index(self._embeddings)
+                self._save_index()
+
+            chunk_count = len(new_chunks)
+            processing_time = time.time() - start_time
+
+            # Track metrics
+            from app.services.metrics import track_document_processing, track_chunks_created
+            file_type = Path(path).suffix.lower()
+            track_document_processing(file_type, success=True)
+            track_chunks_created(chunk_count)
+
+            logger.info(f"Successfully indexed {chunk_count} chunks from {path} in {processing_time:.2f}s")
+            return chunk_count
+
+        except Exception as e:
+            processing_time = time.time() - start_time
+            logger.error(f"Failed to ingest file {path} after {processing_time:.2f}s: {e}")
+
+            # Track failed processing
+            from app.services.metrics import track_document_processing
+            file_type = Path(path).suffix.lower()
+            track_document_processing(file_type, success=False)
+
+            raise
 
     def ingest_text(self, text: str, source: str = "inline") -> int:
         """Ingest raw text directly (no file needed)."""
@@ -260,32 +292,58 @@ class DocumentProcessor:
         Return top_k (chunk, score) pairs sorted by cosine similarity.
         Returns [] if no documents are indexed.
         """
-        with self._lock:
-            if not self._chunks or self._embeddings is None:
-                return []
+        import time
+        start_time = time.time()
 
-            q_vec = self._embed([query])   # shape (1, dim)
+        try:
+            with self._lock:
+                if not self._chunks or self._embeddings is None:
+                    return []
 
-        if _FAISS_AVAILABLE and self._index is not None:
-            # Configure search parameters for IVF index
-            if hasattr(self._index, 'nprobe'):
-                self._index.nprobe = min(10, self._index.nlist)  # Search more cells for better accuracy
+                q_vec = self._embed([query])   # shape (1, dim)
 
-            scores, indices = self._index.search(q_vec, min(top_k, len(self._chunks)))
-            return [
-                (self._chunks[i], float(scores[0][j]))
-                for j, i in enumerate(indices[0])
-                if i >= 0
-            ]
-        else:
-            # Numpy brute-force cosine (embeddings already normalised)
-            sims = (self._embeddings @ q_vec.T).flatten()
-            top  = np.argsort(sims)[::-1][:top_k]
-            return [(self._chunks[i], float(sims[i])) for i in top]
+            if _FAISS_AVAILABLE and self._index is not None:
+                # Configure search parameters for IVF index
+                if hasattr(self._index, 'nprobe'):
+                    self._index.nprobe = min(10, self._index.nlist)  # Search more cells for better accuracy
+
+                scores, indices = self._index.search(q_vec, min(top_k, len(self._chunks)))
+                results = [
+                    (self._chunks[i], float(scores[0][j]))
+                    for j, i in enumerate(indices[0])
+                    if i >= 0
+                ]
+            else:
+                # Numpy brute-force cosine (embeddings already normalised)
+                sims = (self._embeddings @ q_vec.T).flatten()
+                top  = np.argsort(sims)[::-1][:top_k]
+                results = [(self._chunks[i], float(sims[i])) for i in top]
+
+            # Track search metrics
+            search_time = time.time() - start_time
+            from app.services.metrics import track_search
+            track_search(search_time)
+
+            return results
+
+        except Exception as e:
+            search_time = time.time() - start_time
+            logger.error(f"Search failed for query '{query}' after {search_time:.2f}s: {e}")
+            # Return empty results on error rather than crashing
+            return []
 
     @property
     def is_ready(self) -> bool:
-        return bool(self._chunks)
+        """Check if the document processor is fully operational."""
+        try:
+            # Check if model is loaded
+            if self._model is None:
+                return False
+            # Check if we can perform basic operations
+            test_embedding = self._embed(["test"])
+            return len(test_embedding) > 0 and test_embedding.shape[1] == self.MODEL_DIM
+        except Exception:
+            return False
 
     @property
     def chunk_count(self) -> int:
