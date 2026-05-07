@@ -54,70 +54,71 @@ This RAG chatbot provides intelligent document-grounded conversations with enter
 
 ## 🏗️ Architecture & Flow
 
+### Documentation Flow
+
 ```mermaid
-graph TB
-    subgraph "Client Layer"
-        A[Web/Mobile App] --> B[REST API]
-        C[Admin Dashboard] --> B
-    end
-
-    subgraph "API Gateway (FastAPI)"
-        B --> D[CORS Middleware]
-        D --> E[Rate Limiting]
-        E --> F[Authentication]
-        F --> G[Request Validation]
-    end
-
-    subgraph "Security Layer"
-        G --> H[Input Safety Filter]
-        H --> I[Content Moderation]
-    end
-
-    subgraph "Business Logic"
-        I --> J{Document Operation?}
-        I --> K{Chat Query?}
-
-        J --> L[Document Processor]
-        K --> M[Session Manager]
-        M --> N[Vector Search]
-        N --> O[LLM Service]
-    end
-
-    subgraph "Data Layer"
-        L --> P[(Document Store)]
-        L --> Q[(FAISS Index)]
-        M --> R[(Redis Cache)]
-        O --> S[OpenAI API]
-    end
-
-    subgraph "Monitoring"
-        T[Prometheus Metrics] --> U[Grafana Dashboard]
-        V[Structured Logging] --> W[ELK Stack]
-        X[Health Checks] --> Y[Uptime Monitoring]
-    end
-
-    subgraph "Infrastructure"
-        Z[Docker Containers] --> AA[Docker Compose]
-        AA --> BB[Ubuntu VM]
-        BB --> CC[Cloud Deployment]
-    end
-
-    style A fill:#e1f5fe
-    style B fill:#f3e5f5
-    style L fill:#e8f5e8
-    style O fill:#fff3e0
-    style T fill:#fce4ec
+graph TD
+    README[ReadMe Documentation]
+    README --> Guides[Guides]
+    README --> API[API Reference]
+    Guides --> Editor[Editor UI]
+    Editor --> Slash[Slash Commands]
+    Slash --> Mermaid[Mermaid Diagrams]
+    Slash --> Other[Other Blocks]
+    API --> OpenAPI[OpenAPI Spec]
+    API --> Manual[Manual Editor]
 ```
 
-### System Flow
+### Overall System Flow
 
-1. **Document Ingestion**:
-   ```
-   File Upload → Content Validation → Text Extraction → Chunking → Embedding → FAISS Indexing → Storage
-   ```
+```mermaid
+graph LR
+    Browser[User / Frontend] -->|HTTPS| Express[Express Backend]
+    Express -->|Service token / API key| FastAPI[Python RAG API]
+    FastAPI --> Redis[Redis Session / Cache]
+    FastAPI --> FAISS[FAISS Vector Store]
+    FastAPI --> Storage[Document Storage]
+    FastAPI --> OpenAI[OpenAI GPT]
+    FastAPI --> Monitoring[Prometheus / Metrics]
+    Express -->|Optional logs| Monitoring
+```
 
-2. **Query Processing**:
-   ```
+### Document Ingestion Flow
+
+```mermaid
+graph TD
+    Upload[Upload Document] --> Validate[File Validation]
+    Validate --> Extract[Text Extraction]
+    Extract --> Chunk[Text Chunking]
+    Chunk --> Embed[Embedding Generation]
+    Embed --> Index[FAISS Indexing]
+    Index --> Store[Save Document + Chunks]
+```
+
+### Query Processing Flow
+
+```mermaid
+graph TD
+    Query[User Query] --> Input[Input Safety Check]
+    Input --> Session[Session Lookup]
+    Session --> Search[Vector Search]
+    Search --> Prompt[LLM Prompt Construction]
+    Prompt --> OpenAI[Generate Answer]
+    OpenAI --> Output[Output Safety Check]
+    Output --> Response[Return Answer + Sources]
+```
+
+### How it works
+
+- **React → Express**: Browser sends JWT cookie to Express. Express validates the user session.
+- **Express → Python**: Express calls the FastAPI service using an internal service token or API key.
+- **Python FastAPI**: The RAG service handles document ingestion, vector search, and OpenAI generation.
+- **Storage**: Documents are kept on disk, embeddings are stored in FAISS, sessions and limits are cached in Redis.
+- **Monitoring**: Prometheus metrics and health checks keep the service observable.
+
+---
+
+## ✨ Key Features
    User Query → Input Filtering → Session Retrieval → Vector Search → Context Assembly → LLM Generation → Output Filtering → Response
    ```
 
